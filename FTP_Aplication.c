@@ -75,6 +75,95 @@ int parse_url(const char *url, UrlInfo *info) {
 
 }
 
+int write_command(int sockfd, const char *command) {
+    char cmd_buf[256];
+    snprintf(cmd_buf, sizeof(cmd_buf), "%s\r\n", command);
+    
+    printf(">> %s", cmd_buf);
+
+    size_t len = strlen(cmd_buf);
+    if (write(sockfd, cmd_buf, len) != len) {
+        perror("write_command()");
+        return -1;
+    }
+    return 0;
+}
+
+int read_response(int sockfd, char *full_response) {
+    char *ptr = full_response;
+    int bytes_read;
+    int code = 0;
+    
+    full_response[0] = '\0';
+
+    do {
+        // Tenta ler um bloco de dados
+        bytes_read = read(sockfd, ptr, MAX_RESPONSE_SIZE - (ptr - full_response) - 1);
+        if (bytes_read <= 0) {
+            if (bytes_read == 0) fprintf(stderr, "Server closed control connection unexpectedly.\n");
+            else perror("read()");
+            return -1; // Sai se falhar
+        }   
+        ptr[bytes_read] = '\0';
+        printf("<< %s", ptr);
+
+        // Verifica o código ftp
+
+        if (sscanf(full_response, "%d", &code) == 1) {
+            char *last_line = strrchr(full_response, '\n'); 
+            if (last_line && (last_line - full_response) >= 4 && last_line[-4] == ' ') {
+                 return code; 
+            }
+        }
+        ptr += bytes_read; 
+    } while ((ptr - full_response) < MAX_RESPONSE_SIZE - 1);
+    
+    fprintf(stderr, "Error\n");
+    return -1;
+}
+
+int ftp_login(int sockfd, const UrlInfo *info) {
+    char response[MAX_RESPONSE_SIZE];
+    int code;
+
+    // 220 pronto para novo usuario
+    code = read_response(sockfd, response);
+    if (code != 220) {
+        fprintf(stderr, "eroo: nao está pronto para login (Code %d)\n", code);
+        return -1;
+    }
+    
+    char user_cmd[100];
+    snprintf(user_cmd, 100, "USER %s", info->user);
+    if (write_command(sockfd, user_cmd) == -1) return -1;
+    
+    // 3. Ler resposta
+    code = read_response(sockfd, response);
+    
+    if (code == 230) {
+        printf("Login anonimo.\n");
+        return 0;
+    } else if (code != 331) {
+        fprintf(stderr, "erro: login (Code %d)\n", code);
+        return -1;
+    }
+
+    // 331 - user ok pass falta
+    char pass_cmd[100];
+    snprintf(pass_cmd, 100, "PASS %s", info->password);
+    if (write_command(sockfd, pass_cmd) == -1) return -1;
+
+    // 230 login com sucesso
+    code = read_response(sockfd, response);
+    if (code == 230) {
+        printf("login feito.\n");
+        return 0;
+    } else {
+        fprintf(stderr, "erro: pass (Code %d)\n", code);
+        return -1;
+    }
+}
+
 int main(int argc, char **argv) {
     
     
@@ -82,7 +171,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Usage: %s ftp://[<user>:<password>@]<host>/<url-path>\n", argv[0]);
         exit(-1);
     }
-
+    
     UrlInfo url_data;
     if (parse_url(argv[1], &url_data) == -1) {
         fprintf(stderr, "Error: Invalid FTP URL format.\n");
@@ -90,20 +179,45 @@ int main(int argc, char **argv) {
     }
 
     struct hostent *h;
-    if ((h = gethostbyname(argv[1])) == NULL) {
+    if ((h = gethostbyname(url_data.host)) == NULL) {
         herror("gethostbyname()");
         fprintf(stderr,"erro");
         return -1;
     }
 
-    printf("IP Address : %s\n", inet_ntoa(*((struct in_addr *) h->h_addr)));
+    //printf("IP Address : %s\n", inet_ntoa(*((struct in_addr *) h->h_addr)));
 
-    printf("--- URL Parsed Successfully ---\n");
-    printf("User: %s\n", url_data.user);
-    printf("Pass: %s\n", url_data.password);
-    printf("Host: %s\n", url_data.host);
-    printf("Path: %s\n", url_data.path);
-    printf("File: %s\n", url_data.filename);
+    int sockfd = -1;
+    struct sockaddr_in server_addr;
+
+    bzero((char *) &server_addr, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(FTP_CONTROL_PORT);
+
+    // ip resolvido pelo dns h->h_adress
+    bcopy((char *)h->h_addr, (char *)&server_addr.sin_addr.s_addr, h->h_length);
+
+    if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        perror("socket()");
+        return -1;
+    }
+
+    if (connect(sockfd,(struct sockaddr *) &server_addr,sizeof(server_addr)) < 0) {
+        perror("connect()");
+        close(sockfd);
+        return -1;
+    }
+
+
+    if (ftp_login(sockfd, &url_data) != 0) {
+        close(sockfd);
+        return 1;
+    }
+    printf("Fase 2 (Login) concluída com sucesso.\n");
+    write_command(sockfd, "QUIT");
+    close(sockfd);
+
 
     return 0;
 }
+
