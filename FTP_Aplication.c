@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdbool.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>  
@@ -12,7 +13,7 @@
 #define MAX_RESPONSE_SIZE 1024
 
 #define DEFAULT_USER "anonymous"
-#define DEFAULT_PASS "user@example.com"
+#define DEFAULT_PASS "anonymous"
 
 typedef struct {
     char user[50];
@@ -21,6 +22,7 @@ typedef struct {
     char path[200];
     char filename[100];
 } UrlInfo;
+
 
 int parse_url(const char *url, UrlInfo *info) {
     char url_copy[256];
@@ -51,7 +53,7 @@ int parse_url(const char *url, UrlInfo *info) {
         strncpy(info->password, DEFAULT_PASS, sizeof(info->password));
     }
 
-    // primeiro slash que divide iformaçao host e url-path
+    // primeiro slash que divide informação host e url-path
     char *first_slash = strstr(ptr, "/");
     if (first_slash == NULL) return -1;
     *first_slash = '\0';
@@ -59,7 +61,7 @@ int parse_url(const char *url, UrlInfo *info) {
 
     strncpy(info->path, first_slash + 1, sizeof(info->path) - 1);
 
-    //o filename esta depois do ultimo slash
+    // o filename está depois do último slash
     char *last_slash = strrchr(info->path, '/');
     if (last_slash == NULL) {
         strncpy(info->filename, info->path, sizeof(info->filename));
@@ -67,106 +69,195 @@ int parse_url(const char *url, UrlInfo *info) {
         strncpy(info->filename, last_slash + 1, sizeof(info->filename));
     }
 
-    // para segura null termination
     info->user[sizeof(info->user) - 1] = '\0';
     info->host[sizeof(info->host) - 1] = '\0';
+
+
+     
+    printf("Download Values:\n");
+    printf("User:              %s\n", info->user);
+    printf("Password:          %s\n", info->password);
+    printf("Host:              %s\n", info->host);
+    printf("URL Path:          %s\n", info->path);
+
     
     return 0;
-
 }
 
-int write_command(int sockfd, const char *command) {
-    char cmd_buf[256];
-    snprintf(cmd_buf, sizeof(cmd_buf), "%s\r\n", command);
-    
-    printf(">> %s", cmd_buf);
-
-    size_t len = strlen(cmd_buf);
-    if (write(sockfd, cmd_buf, len) != len) {
-        perror("write_command()");
-        return -1;
+int write_command(int sockfd, const char *cmd) {
+    int n = write(sockfd, cmd, strlen(cmd));
+    if (n < 0) {
+        perror("write()");
+        exit(1);
     }
-    return 0;
+    printf("SENT: %s", cmd);  // já inclui \r\n no final
+    return n;
 }
 
-int read_response(int sockfd, char *full_response) {
-    char *ptr = full_response;
-    int bytes_read;
-    int code = 0;
-    
-    full_response[0] = '\0';
 
-    do {
-        // Tenta ler um bloco de dados
-        bytes_read = read(sockfd, ptr, MAX_RESPONSE_SIZE - (ptr - full_response) - 1);
-        if (bytes_read <= 0) {
-            if (bytes_read == 0) fprintf(stderr, "Server closed control connection unexpectedly.\n");
-            else perror("read()");
-            return -1; // Sai se falhar
-        }   
-        ptr[bytes_read] = '\0';
-        printf("<< %s", ptr);
-
-        // Verifica o código ftp
-
-        if (sscanf(full_response, "%d", &code) == 1) {
-            char *last_line = strrchr(full_response, '\n'); 
-            if (last_line && (last_line - full_response) >= 4 && last_line[-4] == ' ') {
-                 return code; 
-            }
-        }
-        ptr += bytes_read; 
-    } while ((ptr - full_response) < MAX_RESPONSE_SIZE - 1);
-    
-    fprintf(stderr, "Error\n");
-    return -1;
+int read_response(int sockfd, char *buffer) {
+    int n = read(sockfd, buffer, MAX_RESPONSE_SIZE );
+    if (n < 0) {
+        perror("read()");
+        exit(1);
+    }
+    buffer[n] = '\0';
+    //printf("ok\n");
+    return n;
 }
 
 int ftp_login(int sockfd, const UrlInfo *info) {
     char response[MAX_RESPONSE_SIZE];
-    int code;
 
     // 220 pronto para novo usuario
-    code = read_response(sockfd, response);
-    if (code != 220) {
-        fprintf(stderr, "eroo: nao está pronto para login (Code %d)\n", code);
-        return -1;
+    read_response(sockfd, response);   
+    if (strncmp(response, "220", 3) != 0) {
+            printf("Error: expected 220.\n");
+        exit(1);
     }
-    
-    char user_cmd[100];
-    snprintf(user_cmd, 100, "USER %s", info->user);
-    if (write_command(sockfd, user_cmd) == -1) return -1;
-    
-    // 3. Ler resposta
-    code = read_response(sockfd, response);
-    
-    if (code == 230) {
-        printf("Login anonimo.\n");
-        return 0;
-    } else if (code != 331) {
-        fprintf(stderr, "erro: login (Code %d)\n", code);
+    printf("SERVER: %s", response);
+
+
+    char cmd[100];
+    snprintf(cmd, 100, "USER %s\r\n", info->user);
+    write_command(sockfd, cmd);
+    read_response(sockfd, response);
+    if (strncmp(response, "331", 3) != 0) {
+            printf("Erro: esperado 331.\n");
+        exit(1);
+    }
+    printf("SERVER: %s", response);
+
+
+    snprintf(cmd, 100, "PASS %s\r\n", info->password);
+    write_command(sockfd, cmd);
+    read_response(sockfd, response);
+    if (strncmp(response, "230", 3) != 0) {
+            printf("Erro: esperado 230.\n");
+        exit(1);
+    }
+    printf("SERVER: %s", response);
+
+    return 0;
+}
+
+
+int ftp_enter_passive_mode(int sockfd, char *data_ip, int *data_port) {
+    char response[MAX_RESPONSE_SIZE];
+    char cmd[100];
+
+
+    snprintf(cmd, 100, "PASV\r\n");
+    write_command(sockfd, cmd);
+    read_response(sockfd, response);
+    if (strncmp(response, "227", 3) != 0) {
+            printf("Erro: esperado 227.\n");
+        exit(1);
+    }
+    printf("SERVER: %s", response);
+
+
+    int h1, h2, h3, h4, p1, p2;
+    if (sscanf(response, "%*[^(](%d,%d,%d,%d,%d,%d)", &h1, &h2, &h3, &h4, &p1, &p2) < 6) {
+        fprintf(stderr, "erro: nao foi possivel interpretar resposta PASV.\n");
         return -1;
     }
 
-    // 331 - user ok pass falta
-    char pass_cmd[100];
-    snprintf(pass_cmd, 100, "PASS %s", info->password);
-    if (write_command(sockfd, pass_cmd) == -1) return -1;
+    snprintf(data_ip, 64, "%d.%d.%d.%d", h1, h2, h3, h4);
+    *data_port = p1 * 256 + p2;
 
-    // 230 login com sucesso
-    code = read_response(sockfd, response);
-    if (code == 230) {
-        printf("login feito.\n");
-        return 0;
-    } else {
-        fprintf(stderr, "erro: pass (Code %d)\n", code);
+    printf("Modo passivo ativado: %s:%d\n", data_ip, *data_port);
+    
+    return 0;
+}
+
+
+int ftp_download_file(int sockfd, const UrlInfo *info) {
+    char data_ip[64];
+    int data_port;
+    char response[MAX_RESPONSE_SIZE];
+    char cmd[1024];
+
+    if (ftp_enter_passive_mode(sockfd, data_ip, &data_port) != 0) {
         return -1;
     }
+
+    int data_sockfd;
+    struct sockaddr_in data_addr;
+
+    if ((data_sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        perror("socket() data");
+        return -1;
+    }
+
+
+    snprintf(cmd, sizeof(cmd), "RETR /%s\r\n", info->path);
+    write_command(sockfd, cmd);
+    read_response(sockfd, response);
+    bool flag = false;
+    if (strncmp(response, "150", 3) == 0) {
+        flag = true;
+    }
+    if (strncmp(response, "125", 3) == 0) {
+        flag = true;
+    }
+    if (flag == false) {
+        printf("Erro: esperado 150 ou 125.\n");
+        exit(1);
+    }
+    printf("SERVER: %s", response);
+
+
+    bzero((char *)&data_addr, sizeof(data_addr));
+    data_addr.sin_family = AF_INET;
+    data_addr.sin_port = htons(data_port);
+    data_addr.sin_addr.s_addr = inet_addr(data_ip);
+
+    if (connect(data_sockfd, (struct sockaddr *)&data_addr, sizeof(data_addr)) < 0) {
+        perror("connect() data");
+        close(data_sockfd);
+        return -1;
+    }
+
+    //printf("Conexao de dados (modo passivo) estabelecida.\n");
+
+    FILE *fp = fopen(info->filename, "wb");
+    if (fp == NULL) {
+        perror("fopen()");
+        close(data_sockfd);
+        return -1;
+    }
+
+    char buffer[1024];
+    int bytes_read;
+    printf("Baixando ficheiro '%s'...\n", info->filename);
+    while ((bytes_read = read(data_sockfd, buffer, sizeof(buffer))) > 0) {
+        fwrite(buffer, 1, bytes_read, fp);
+    }
+
+    snprintf(cmd, sizeof(cmd), "QUIT\r\n");
+    write_command(sockfd, cmd);
+
+    fclose(fp);
+    close(sockfd);
+    close(data_sockfd);
+
+    /*if (bytes_read < 0) {
+        perror("read() data");
+        return -1;
+    }
+
+    //read_response(sockfd, response);
+    if (code != 226) {
+        fprintf(stderr, "erro: transferencia incompleta (Code %d)\n", code);
+        return -1;
+    }*/
+
+    printf("Download concluido com sucesso: %s\n", info->filename);
+    return 0;
 }
 
 int main(int argc, char **argv) {
-    
-    
     if (argc != 2) {
         fprintf(stderr, "Usage: %s ftp://[<user>:<password>@]<host>/<url-path>\n", argv[0]);
         exit(-1);
@@ -181,20 +272,15 @@ int main(int argc, char **argv) {
     struct hostent *h;
     if ((h = gethostbyname(url_data.host)) == NULL) {
         herror("gethostbyname()");
-        fprintf(stderr,"erro");
         return -1;
     }
 
-    //printf("IP Address : %s\n", inet_ntoa(*((struct in_addr *) h->h_addr)));
-
-    int sockfd = -1;
+    int sockfd;
     struct sockaddr_in server_addr;
 
-    bzero((char *) &server_addr, sizeof(server_addr));
+    bzero((char *)&server_addr, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(FTP_CONTROL_PORT);
-
-    // ip resolvido pelo dns h->h_adress
     bcopy((char *)h->h_addr, (char *)&server_addr.sin_addr.s_addr, h->h_length);
 
     if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
@@ -202,22 +288,24 @@ int main(int argc, char **argv) {
         return -1;
     }
 
-    if (connect(sockfd,(struct sockaddr *) &server_addr,sizeof(server_addr)) < 0) {
+    if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         perror("connect()");
         close(sockfd);
         return -1;
     }
 
-
     if (ftp_login(sockfd, &url_data) != 0) {
         close(sockfd);
         return 1;
     }
+
     printf("Fase 2 (Login) concluída com sucesso.\n");
-    write_command(sockfd, "QUIT");
-    close(sockfd);
 
+    if (ftp_download_file(sockfd, &url_data) != 0) {
+        fprintf(stderr, "erro ao baixar o ficheiro.\n");
+        return 1;
+    }
 
+    printf("Conexao encerrada.\n");
     return 0;
 }
-
