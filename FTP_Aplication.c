@@ -190,10 +190,21 @@ int ftp_download_file(int sockfd, const UrlInfo *info) {
         return -1;
     }
 
+    bzero((char *)&data_addr, sizeof(data_addr));
+    data_addr.sin_family = AF_INET;
+    data_addr.sin_port = htons(data_port);
+    data_addr.sin_addr.s_addr = inet_addr(data_ip);
 
-    snprintf(cmd, sizeof(cmd), "RETR /%s\r\n", info->path);
+    if (connect(data_sockfd, (struct sockaddr *)&data_addr, sizeof(data_addr)) < 0) {
+        perror("connect() data");
+        close(data_sockfd);
+        return -1;
+    }
+
+    snprintf(cmd, sizeof(cmd), "RETR %s%s\r\n", info->path[0] == '/' ? "" : "/", info->path); // correção - para caso começar com / era possivel erro
     write_command(sockfd, cmd);
     read_response(sockfd, response);
+
     bool flag = false;
     if (strncmp(response, "150", 3) == 0) {
         flag = true;
@@ -205,19 +216,10 @@ int ftp_download_file(int sockfd, const UrlInfo *info) {
         printf("Erro: esperado 150 ou 125.\n");
         exit(1);
     }
+
     printf("SERVER: %s", response);
 
-
-    bzero((char *)&data_addr, sizeof(data_addr));
-    data_addr.sin_family = AF_INET;
-    data_addr.sin_port = htons(data_port);
-    data_addr.sin_addr.s_addr = inet_addr(data_ip);
-
-    if (connect(data_sockfd, (struct sockaddr *)&data_addr, sizeof(data_addr)) < 0) {
-        perror("connect() data");
-        close(data_sockfd);
-        return -1;
-    }
+   
 
     //printf("Conexao de dados (modo passivo) estabelecida.\n");
 
@@ -234,6 +236,14 @@ int ftp_download_file(int sockfd, const UrlInfo *info) {
     while ((bytes_read = read(data_sockfd, buffer, sizeof(buffer))) > 0) {
         fwrite(buffer, 1, bytes_read, fp);
     }
+    
+    // correção do codigo 226
+
+    read_response(sockfd, response);
+    if (strncmp(response, "226", 3) != 0) {
+    printf("transferência incompleta.\n");
+    }
+    printf("SERVER: %s", response);
 
     snprintf(cmd, sizeof(cmd), "QUIT\r\n");
     write_command(sockfd, cmd);
